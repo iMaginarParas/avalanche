@@ -1185,22 +1185,30 @@ npx hardhat run scripts/deploy.js --network fuji
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
     logger.error(f"HTTP {exc.status_code}: {exc.detail}")
-    return {
-        "error": True,
-        "status_code": exc.status_code,
-        "message": exc.detail,
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": True,
+            "status_code": exc.status_code,
+            "message": exc.detail,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    )
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request, exc):
     logger.error(f"Unhandled exception: {exc}")
-    return {
-        "error": True,
-        "status_code": 500,
-        "message": "Internal server error",
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": True,
+            "status_code": 500,
+            "message": "Internal server error",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    )
 
 # Startup event
 @app.on_event("startup")
