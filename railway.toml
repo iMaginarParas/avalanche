@@ -10,8 +10,10 @@ restartPolicyMaxRetries = 10
 
 [env]
 # Environment variables - set these in Railway dashboard
-# PRIVATE_KEY = "your_platform_wallet_private_key"
+# PRIVATE_KEY = "your_platform_wallet_private_key"  
 # CONTRACT_ADDRESS = "your_deployed_contract_address"
+# ENVIRONMENT = "production"
 
 [build.env]
 PYTHON_VERSION = "3.11"
+PIP_UPGRADE = "1"

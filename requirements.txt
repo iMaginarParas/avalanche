@@ -6,3 +6,5 @@ python-multipart==0.0.6
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-dotenv==1.0.0
+setuptools==69.5.1
+wheel==0.43.0
