@@ -1,4 +1,4 @@
-# FastAPI with Smart Contract Integration
+# FastAPI with Smart Contract Integration - Updated Version
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -40,7 +40,7 @@ if config.ENVIRONMENT == "production":
         title="Crypto Freelance Payment API",
         version="2.0.0",
         description="Blockchain-based freelance payment system with smart contract escrow",
-        docs_url="/docs",  # Keep docs but could be disabled for security
+        docs_url="/docs",
         redoc_url="/redoc"
     )
 else:
@@ -78,6 +78,13 @@ ESCROW_ABI = [
         "inputs": [{"name": "_feeRecipient", "type": "address"}],
         "stateMutability": "nonpayable",
         "type": "constructor"
+    },
+    {
+        "inputs": [],
+        "name": "taskCounter",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function"
     },
     {
         "inputs": [
@@ -288,7 +295,7 @@ class TaskMetadata(BaseModel):
     description: str
     currency: CurrencyType
 
-# Helper Functions
+# Helper Functions with Improved Error Handling
 def get_platform_account():
     """Get platform wallet account from private key"""
     if not config.PRIVATE_KEY:
@@ -299,27 +306,73 @@ def get_platform_account():
         raise HTTPException(status_code=500, detail=f"Invalid private key: {str(e)}")
 
 def get_escrow_contract() -> Contract:
-    """Get escrow contract instance"""
+    """Get escrow contract instance with better error handling"""
     if not w3:
+        logger.error("Web3 not connected")
         raise HTTPException(status_code=500, detail="Web3 not connected")
+    
+    if not w3.is_connected():
+        logger.error("Web3 connection lost")
+        raise HTTPException(status_code=500, detail="Web3 connection lost")
+    
     if not config.CONTRACT_ADDRESS:
+        logger.error("Contract address not configured")
         raise HTTPException(status_code=500, detail="Contract address not configured")
+    
     try:
-        return w3.eth.contract(address=config.CONTRACT_ADDRESS, abi=ESCROW_ABI)
+        # Validate contract address format
+        if not w3.is_address(config.CONTRACT_ADDRESS):
+            raise ValueError("Invalid contract address format")
+        
+        contract = w3.eth.contract(address=config.CONTRACT_ADDRESS, abi=ESCROW_ABI)
+        
+        # Test the contract by calling a simple view function
+        try:
+            task_counter = contract.functions.taskCounter().call()
+            logger.debug(f"Contract connection verified: {config.CONTRACT_ADDRESS}, task counter: {task_counter}")
+        except Exception as test_error:
+            logger.error(f"Contract test call failed: {test_error}")
+            # Still return the contract instance, just warn about the test failure
+            logger.warning(f"Contract might not be deployed or accessible: {test_error}")
+        
+        return contract
     except Exception as e:
+        logger.error(f"Failed to connect to contract: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to connect to contract: {str(e)}")
 
 def get_token_contract(currency: CurrencyType) -> Contract:
-    """Get token contract instance"""
+    """Get token contract instance with better error handling"""
     if not w3:
         raise HTTPException(status_code=500, detail="Web3 not connected")
     
-    if currency == CurrencyType.USDC:
-        return w3.eth.contract(address=config.USDC_ADDRESS, abi=ERC20_ABI)
-    elif currency == CurrencyType.USDT:
-        return w3.eth.contract(address=config.USDT_ADDRESS, abi=ERC20_ABI)
-    else:
-        raise ValueError(f"Invalid token currency: {currency}")
+    if not w3.is_connected():
+        raise HTTPException(status_code=500, detail="Web3 connection lost")
+    
+    try:
+        if currency == CurrencyType.USDC:
+            address = config.USDC_ADDRESS
+        elif currency == CurrencyType.USDT:
+            address = config.USDT_ADDRESS
+        else:
+            raise ValueError(f"Invalid token currency: {currency}")
+        
+        if not w3.is_address(address):
+            raise ValueError(f"Invalid token address for {currency}: {address}")
+        
+        contract = w3.eth.contract(address=address, abi=ERC20_ABI)
+        
+        # Test the contract by calling decimals (most ERC20 tokens have this)
+        try:
+            decimals = contract.functions.decimals().call()
+            logger.debug(f"Token contract connection verified: {currency} at {address}, decimals: {decimals}")
+        except Exception as test_error:
+            logger.warning(f"Token contract test failed for {currency}: {test_error}")
+            # Don't raise exception here as some tokens might not implement all functions
+        
+        return contract
+    except Exception as e:
+        logger.error(f"Failed to get token contract for {currency}: {e}")
+        raise ValueError(f"Failed to get token contract for {currency}: {str(e)}")
 
 def get_token_address(currency: CurrencyType) -> str:
     """Get token contract address"""
@@ -378,22 +431,35 @@ def parse_contract_task(contract_task, task_metadata: dict) -> TaskResponse:
 users_db: Dict[str, User] = {}
 task_metadata_db: Dict[int, dict] = {}
 
-# Authentication
+# Improved Authentication
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> User:
-    """Get current user from token (wallet address)"""
+    """Get current user from token (wallet address) with improved error handling"""
     try:
         token = credentials.credentials
+        if not token:
+            raise HTTPException(status_code=401, detail="No authentication token provided")
+        
         wallet_address = token.lower()
         
-        if not w3 or not w3.is_address(wallet_address):
+        # Validate wallet address format
+        if not wallet_address.startswith('0x') or len(wallet_address) != 42:
+            raise HTTPException(status_code=401, detail="Invalid wallet address format")
+        
+        if w3 and not w3.is_address(wallet_address):
             raise HTTPException(status_code=401, detail="Invalid wallet address")
         
+        # Get or create user
         if wallet_address not in users_db:
             user = User(wallet_address=wallet_address)
             users_db[wallet_address] = user
+            logger.info(f"New user created in session: {wallet_address}")
         
         return users_db[wallet_address]
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
+        logger.error(f"Authentication failed: {e}")
         raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")
 
 # API Endpoints
@@ -440,14 +506,180 @@ async def health_check():
             
             # Check contract
             if config.CONTRACT_ADDRESS:
-                contract = get_escrow_contract()
-                # Try a simple view call to test contract
-                health_status["contract"] = "healthy"
+                try:
+                    contract = get_escrow_contract()
+                    # Try a simple view call to test contract
+                    task_counter = contract.functions.taskCounter().call()
+                    health_status["contract"] = "healthy"
+                    health_status["task_counter"] = task_counter
+                except Exception as contract_error:
+                    health_status["contract"] = "unhealthy"
+                    health_status["contract_error"] = str(contract_error)
     
     except Exception as e:
         health_status["error"] = str(e)
     
     return health_status
+
+@app.get("/network/health")
+async def network_health():
+    """Detailed network health check"""
+    health_info = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "web3": {
+            "initialized": w3 is not None,
+            "connected": False,
+            "latest_block": None,
+            "chain_id": None,
+            "gas_price": None
+        },
+        "contract": {
+            "address": config.CONTRACT_ADDRESS,
+            "accessible": False,
+            "task_counter": None
+        },
+        "tokens": {
+            "USDC": {"address": config.USDC_ADDRESS, "accessible": False},
+            "USDT": {"address": config.USDT_ADDRESS, "accessible": False}
+        }
+    }
+    
+    # Test Web3 connection
+    if w3:
+        try:
+            health_info["web3"]["connected"] = w3.is_connected()
+            if health_info["web3"]["connected"]:
+                health_info["web3"]["latest_block"] = w3.eth.block_number
+                health_info["web3"]["chain_id"] = w3.eth.chain_id
+                health_info["web3"]["gas_price"] = str(w3.eth.gas_price)
+        except Exception as e:
+            health_info["web3"]["error"] = str(e)
+    
+    # Test contract
+    if config.CONTRACT_ADDRESS:
+        try:
+            contract = w3.eth.contract(address=config.CONTRACT_ADDRESS, abi=ESCROW_ABI)
+            task_counter = contract.functions.taskCounter().call()
+            health_info["contract"]["accessible"] = True
+            health_info["contract"]["task_counter"] = task_counter
+        except Exception as e:
+            health_info["contract"]["error"] = str(e)
+    
+    # Test token contracts
+    for currency in ["USDC", "USDT"]:
+        try:
+            token_contract = get_token_contract(CurrencyType(currency))
+            decimals = token_contract.functions.decimals().call()
+            health_info["tokens"][currency]["accessible"] = True
+            health_info["tokens"][currency]["decimals"] = decimals
+        except Exception as e:
+            health_info["tokens"][currency]["error"] = str(e)
+    
+    return health_info
+
+@app.get("/debug/profile/{wallet_address}")
+async def debug_profile(wallet_address: str):
+    """Debug endpoint to test each component of profile fetching"""
+    debug_results = {
+        "wallet_address": wallet_address,
+        "timestamp": datetime.utcnow().isoformat(),
+        "tests": {}
+    }
+    
+    # Test 1: Web3 connection
+    try:
+        if w3 and w3.is_connected():
+            debug_results["tests"]["web3_connection"] = {
+                "status": "success",
+                "latest_block": w3.eth.block_number,
+                "chain_id": w3.eth.chain_id
+            }
+        else:
+            debug_results["tests"]["web3_connection"] = {
+                "status": "failed",
+                "error": "Web3 not connected"
+            }
+    except Exception as e:
+        debug_results["tests"]["web3_connection"] = {
+            "status": "error",
+            "error": str(e)
+        }
+    
+    # Test 2: Contract connection
+    try:
+        contract = get_escrow_contract()
+        task_counter = contract.functions.taskCounter().call()
+        debug_results["tests"]["contract_connection"] = {
+            "status": "success",
+            "task_counter": task_counter
+        }
+    except Exception as e:
+        debug_results["tests"]["contract_connection"] = {
+            "status": "error", 
+            "error": str(e)
+        }
+    
+    # Test 3: Get client tasks
+    try:
+        contract = get_escrow_contract()
+        client_tasks = contract.functions.getClientTasks(wallet_address).call()
+        debug_results["tests"]["client_tasks"] = {
+            "status": "success",
+            "count": len(client_tasks),
+            "task_ids": client_tasks
+        }
+    except Exception as e:
+        debug_results["tests"]["client_tasks"] = {
+            "status": "error",
+            "error": str(e)
+        }
+    
+    # Test 4: Get freelancer tasks
+    try:
+        contract = get_escrow_contract()
+        freelancer_tasks = contract.functions.getFreelancerTasks(wallet_address).call()
+        debug_results["tests"]["freelancer_tasks"] = {
+            "status": "success", 
+            "count": len(freelancer_tasks),
+            "task_ids": freelancer_tasks
+        }
+    except Exception as e:
+        debug_results["tests"]["freelancer_tasks"] = {
+            "status": "error",
+            "error": str(e)
+        }
+    
+    # Test 5: Get AVAX balance
+    try:
+        balance_wei = w3.eth.get_balance(wallet_address)
+        balance_avax = wei_to_ether(balance_wei)
+        debug_results["tests"]["avax_balance"] = {
+            "status": "success",
+            "balance_wei": str(balance_wei),
+            "balance_avax": str(balance_avax)
+        }
+    except Exception as e:
+        debug_results["tests"]["avax_balance"] = {
+            "status": "error",
+            "error": str(e)
+        }
+    
+    # Test 6: Get USDC balance
+    try:
+        usdc_contract = get_token_contract(CurrencyType.USDC)
+        usdc_balance = usdc_contract.functions.balanceOf(wallet_address).call()
+        debug_results["tests"]["usdc_balance"] = {
+            "status": "success",
+            "balance_raw": str(usdc_balance),
+            "balance_formatted": str(base_unit_to_token(usdc_balance, 6))
+        }
+    except Exception as e:
+        debug_results["tests"]["usdc_balance"] = {
+            "status": "error",
+            "error": str(e)
+        }
+    
+    return debug_results
 
 @app.post("/users/register", response_model=User)
 async def register_user(user_data: UserRegistration):
@@ -455,7 +687,10 @@ async def register_user(user_data: UserRegistration):
     try:
         wallet_address = user_data.wallet_address.lower()
         
-        if not w3 or not w3.is_address(wallet_address):
+        if not wallet_address.startswith('0x') or len(wallet_address) != 42:
+            raise HTTPException(status_code=400, detail="Invalid wallet address format")
+        
+        if w3 and not w3.is_address(wallet_address):
             raise HTTPException(status_code=400, detail="Invalid wallet address")
         
         if wallet_address in users_db:
@@ -474,6 +709,86 @@ async def register_user(user_data: UserRegistration):
     except Exception as e:
         logger.error(f"User registration failed: {e}")
         raise HTTPException(status_code=400, detail=f"Registration failed: {str(e)}")
+
+@app.get("/users/profile")
+async def get_user_profile(current_user: User = Depends(get_current_user)):
+    """Get current user profile with improved error handling"""
+    try:
+        logger.info(f"Fetching profile for user: {current_user.wallet_address}")
+        
+        # Initialize default values in case contract calls fail
+        client_tasks = []
+        freelancer_tasks = []
+        balance_avax = Decimal("0")
+        balances = {"AVAX": "0", "USDC": "0", "USDT": "0"}
+        
+        # Try to get contract and user task statistics
+        try:
+            contract = get_escrow_contract()
+            
+            # Get client tasks with individual error handling
+            try:
+                client_tasks = contract.functions.getClientTasks(current_user.wallet_address).call()
+                logger.debug(f"Client tasks retrieved: {len(client_tasks)} tasks")
+            except Exception as e:
+                logger.warning(f"Failed to get client tasks for {current_user.wallet_address}: {e}")
+            
+            # Get freelancer tasks with individual error handling
+            try:
+                freelancer_tasks = contract.functions.getFreelancerTasks(current_user.wallet_address).call()
+                logger.debug(f"Freelancer tasks retrieved: {len(freelancer_tasks)} tasks")
+            except Exception as e:
+                logger.warning(f"Failed to get freelancer tasks for {current_user.wallet_address}: {e}")
+        
+        except Exception as e:
+            logger.warning(f"Contract interaction failed, using default values: {e}")
+        
+        # Get balance information with error handling
+        try:
+            if w3 and w3.is_connected():
+                balance_wei = w3.eth.get_balance(current_user.wallet_address)
+                balance_avax = wei_to_ether(balance_wei)
+                balances["AVAX"] = str(balance_avax)
+                logger.debug(f"AVAX balance retrieved: {balance_avax}")
+        except Exception as e:
+            logger.warning(f"Failed to get AVAX balance for {current_user.wallet_address}: {e}")
+        
+        # Try to get token balances with individual error handling
+        try:
+            usdc_contract = get_token_contract(CurrencyType.USDC)
+            usdc_balance = usdc_contract.functions.balanceOf(current_user.wallet_address).call()
+            balances["USDC"] = str(base_unit_to_token(usdc_balance, 6))
+            logger.debug(f"USDC balance retrieved: {balances['USDC']}")
+        except Exception as e:
+            logger.warning(f"Failed to get USDC balance for {current_user.wallet_address}: {e}")
+            balances["USDC"] = "0"
+        
+        try:
+            usdt_contract = get_token_contract(CurrencyType.USDT)
+            usdt_balance = usdt_contract.functions.balanceOf(current_user.wallet_address).call()
+            balances["USDT"] = str(base_unit_to_token(usdt_balance, 6))
+            logger.debug(f"USDT balance retrieved: {balances['USDT']}")
+        except Exception as e:
+            logger.warning(f"Failed to get USDT balance for {current_user.wallet_address}: {e}")
+            balances["USDT"] = "0"
+        
+        # Construct response with all available data
+        profile_response = {
+            **current_user.dict(),
+            "task_statistics": {
+                "client_tasks_count": len(client_tasks),
+                "freelancer_tasks_count": len(freelancer_tasks),
+                "total_tasks": len(client_tasks) + len(freelancer_tasks)
+            },
+            "wallet_balances": balances
+        }
+        
+        logger.info(f"Profile fetched successfully for {current_user.wallet_address}")
+        return profile_response
+    
+    except Exception as e:
+        logger.error(f"Get user profile failed for {current_user.wallet_address}: {e}")
+        raise HTTPException(status_code=400, detail=f"Failed to get profile: {str(e)}")
 
 @app.post("/tasks/create")
 async def create_task_instructions(
@@ -810,105 +1125,78 @@ async def get_task(
 
 @app.get("/tasks/my")
 async def get_my_tasks(current_user: User = Depends(get_current_user)):
-    """Get tasks for current user"""
+    """Get tasks for current user with improved error handling"""
     try:
-        contract = get_escrow_contract()
-        
-        # Get tasks where user is client
-        client_task_ids = contract.functions.getClientTasks(current_user.wallet_address).call()
-        
-        # Get tasks where user is freelancer
-        freelancer_task_ids = contract.functions.getFreelancerTasks(current_user.wallet_address).call()
-        
-        all_task_ids = list(set(client_task_ids + freelancer_task_ids))
-        
         tasks = []
-        for task_id in all_task_ids:
+        
+        # Try to get tasks from contract
+        try:
+            contract = get_escrow_contract()
+            
+            # Get tasks where user is client
+            client_task_ids = []
             try:
-                task_data = contract.functions.getTask(task_id).call()
-                metadata = task_metadata_db.get(task_id, {})
-                currency = metadata.get("currency", "AVAX")
-                
-                # Convert amount based on currency
-                if currency == "AVAX":
-                    amount = wei_to_ether(task_data[3])
-                else:
-                    amount = base_unit_to_token(task_data[3], 6)
-                
-                task_info = {
-                    "id": task_data[0],
-                    "client": task_data[1],
-                    "freelancer": task_data[2],
-                    "amount": str(amount),
-                    "token_address": task_data[4],
-                    "status": TaskStatus(task_data[5]).name,
-                    "status_code": task_data[5],
-                    "deadline": datetime.fromtimestamp(task_data[6]).isoformat(),
-                    "created_at": datetime.fromtimestamp(task_data[7]).isoformat(),
-                    "funded_at": datetime.fromtimestamp(task_data[8]).isoformat() if task_data[8] > 0 else None,
-                    "client_approved": task_data[9],
-                    "freelancer_delivered": task_data[10],
-                    "metadata": metadata,
-                    "currency": currency,
-                    "user_role": "client" if task_data[1].lower() == current_user.wallet_address.lower() else "freelancer"
-                }
-                tasks.append(task_info)
+                client_task_ids = contract.functions.getClientTasks(current_user.wallet_address).call()
+                logger.debug(f"Found {len(client_task_ids)} client tasks")
             except Exception as e:
-                logger.warning(f"Failed to get task {task_id}: {e}")
+                logger.warning(f"Failed to get client tasks: {e}")
+            
+            # Get tasks where user is freelancer
+            freelancer_task_ids = []
+            try:
+                freelancer_task_ids = contract.functions.getFreelancerTasks(current_user.wallet_address).call()
+                logger.debug(f"Found {len(freelancer_task_ids)} freelancer tasks")
+            except Exception as e:
+                logger.warning(f"Failed to get freelancer tasks: {e}")
+            
+            all_task_ids = list(set(client_task_ids + freelancer_task_ids))
+            
+            for task_id in all_task_ids:
+                try:
+                    task_data = contract.functions.getTask(task_id).call()
+                    metadata = task_metadata_db.get(task_id, {})
+                    currency = metadata.get("currency", "AVAX")
+                    
+                    # Convert amount based on currency
+                    if currency == "AVAX":
+                        amount = wei_to_ether(task_data[3])
+                    else:
+                        amount = base_unit_to_token(task_data[3], 6)
+                    
+                    task_info = {
+                        "id": task_data[0],
+                        "client": task_data[1],
+                        "freelancer": task_data[2],
+                        "amount": str(amount),
+                        "token_address": task_data[4],
+                        "status": TaskStatus(task_data[5]).name,
+                        "status_code": task_data[5],
+                        "deadline": datetime.fromtimestamp(task_data[6]).isoformat(),
+                        "created_at": datetime.fromtimestamp(task_data[7]).isoformat(),
+                        "funded_at": datetime.fromtimestamp(task_data[8]).isoformat() if task_data[8] > 0 else None,
+                        "client_approved": task_data[9],
+                        "freelancer_delivered": task_data[10],
+                        "metadata": metadata,
+                        "currency": currency,
+                        "user_role": "client" if task_data[1].lower() == current_user.wallet_address.lower() else "freelancer"
+                    }
+                    tasks.append(task_info)
+                except Exception as e:
+                    logger.warning(f"Failed to get task {task_id}: {e}")
+        
+        except Exception as e:
+            logger.warning(f"Contract interaction failed: {e}")
         
         return {
             "tasks": tasks,
             "total_count": len(tasks),
-            "client_tasks": len([t for t in tasks if t["user_role"] == "client"]),
-            "freelancer_tasks": len([t for t in tasks if t["user_role"] == "freelancer"])
+            "client_tasks": len([t for t in tasks if t.get("user_role") == "client"]),
+            "freelancer_tasks": len([t for t in tasks if t.get("user_role") == "freelancer"])
         }
     
     except Exception as e:
         logger.error(f"Get my tasks failed: {e}")
         raise HTTPException(status_code=400, detail=f"Failed to get tasks: {str(e)}")
-
-@app.get("/users/profile")
-async def get_user_profile(current_user: User = Depends(get_current_user)):
-    """Get current user profile"""
-    try:
-        # Get user's task statistics
-        contract = get_escrow_contract()
-        client_tasks = contract.functions.getClientTasks(current_user.wallet_address).call()
-        freelancer_tasks = contract.functions.getFreelancerTasks(current_user.wallet_address).call()
-        
-        # Get balance information
-        balance_avax = wei_to_ether(w3.eth.get_balance(current_user.wallet_address))
-        
-        # Try to get token balances
-        balances = {"AVAX": str(balance_avax)}
-        
-        try:
-            usdc_contract = get_token_contract(CurrencyType.USDC)
-            usdc_balance = usdc_contract.functions.balanceOf(current_user.wallet_address).call()
-            balances["USDC"] = str(base_unit_to_token(usdc_balance, 6))
-        except:
-            balances["USDC"] = "0"
-        
-        try:
-            usdt_contract = get_token_contract(CurrencyType.USDT)
-            usdt_balance = usdt_contract.functions.balanceOf(current_user.wallet_address).call()
-            balances["USDT"] = str(base_unit_to_token(usdt_balance, 6))
-        except:
-            balances["USDT"] = "0"
-        
-        return {
-            **current_user.dict(),
-            "task_statistics": {
-                "client_tasks_count": len(client_tasks),
-                "freelancer_tasks_count": len(freelancer_tasks),
-                "total_tasks": len(client_tasks) + len(freelancer_tasks)
-            },
-            "wallet_balances": balances
-        }
-    
-    except Exception as e:
-        logger.error(f"Get user profile failed: {e}")
-        raise HTTPException(status_code=400, detail=f"Failed to get profile: {str(e)}")
 
 @app.get("/contract/info")
 async def get_contract_info():
@@ -1241,9 +1529,9 @@ if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
     
     uvicorn.run(
-        "main:app",  # Use string import for better compatibility
+        "main:app",
         host=host, 
         port=port,
         log_level="info" if config.ENVIRONMENT == "production" else "debug",
-        reload=False  # Disable reload in production
+        reload=False
     )
