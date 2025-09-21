@@ -1,0 +1,17 @@
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+[env]
+# Environment variables - set these in Railway dashboard
+# PRIVATE_KEY = "your_platform_wallet_private_key"
+# CONTRACT_ADDRESS = "your_deployed_contract_address"
+
+[build.env]
+PYTHON_VERSION = "3.11"
