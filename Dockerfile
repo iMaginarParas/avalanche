@@ -10,10 +10,6 @@ RUN apt-get update && apt-get install -y \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Set environment variables
-ENV PORT=8000
-ENV PYTHONPATH=/app
-
 # Copy requirements first for better caching
 COPY requirements.txt .
 
@@ -29,5 +25,5 @@ COPY . .
 # Expose port
 EXPOSE 8000
 
-# Run the application directly with hardcoded port to bypass Railway's PORT issues
-CMD ["python", "-c", "import os; os.environ['PORT']='8000'; exec(open('entrypoint.py').read())"]
+# Run uvicorn directly with hardcoded port to bypass Railway's configuration
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
